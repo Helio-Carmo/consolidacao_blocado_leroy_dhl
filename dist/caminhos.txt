@@ -1,0 +1,4 @@
+C:/DEV/Consolidacao_Blocado/dist/BASE BLOCADO.xlsx
+C:/DEV/Consolidacao_Blocado/dist/Tipologia.xlsx
+C:/DEV/Consolidacao_Blocado/dist/Empilhamento.xlsx
+C:/Users/Admin/OneDrive/Área de Trabalho
