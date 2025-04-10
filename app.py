@@ -5,6 +5,8 @@ from tkinter import filedialog, messagebox
 from pathlib import Path
 import webbrowser
 from datetime import datetime
+from PIL import Image, ImageTk
+
 
 # === FUNÇÃO PARA LER CAMINHOS SALVOS ===
 def carregar_caminhos_salvos():
@@ -15,10 +17,12 @@ def carregar_caminhos_salvos():
     except:
         return ["", "", "", ""]
 
+
 # === FUNÇÃO PARA SALVAR CAMINHOS ===
 def salvar_caminhos(caminhos):
     with open("caminhos.txt", "w") as f:
         f.write("\n".join(caminhos))
+
 
 # === FUNÇÃO PRINCIPAL DE CONSOLIDAÇÃO ===
 def consolidar_blocado(caminhos, label_resultado, label_stats):
@@ -47,10 +51,12 @@ def consolidar_blocado(caminhos, label_resultado, label_stats):
             raise Exception("Coluna 'UMA' não encontrada na base de empilhamento")
 
         empilhamento_pal = empilhamento[empilhamento["UMA"] == "PAL"].copy()
-        empilhamento_pal.rename(columns={"MATERIAL": "Produto", "PALLET - EMPILHAMENTO MÁXIMO": "Empilhamento"}, inplace=True)
+        empilhamento_pal.rename(columns={"MATERIAL": "Produto", "PALLET - EMPILHAMENTO MÁXIMO": "Empilhamento"},
+                                inplace=True)
 
         blocado_emp = pd.merge(base_blocado, empilhamento_pal[["Produto", "Empilhamento"]], on="Produto", how="left")
-        blocado_emp = pd.merge(blocado_emp, tipologia[["Pos.depós.", "TP"]], left_on="posição no depósito", right_on="Pos.depós.", how="left")
+        blocado_emp = pd.merge(blocado_emp, tipologia[["Pos.depós.", "TP"]], left_on="posição no depósito",
+                               right_on="Pos.depós.", how="left")
 
         blocado_emp["Capacidade_base"] = blocado_emp["TP"].str.extract(r'B(\d+)').astype(float)
         blocado_emp["Empilhamento"] = blocado_emp["Empilhamento"].fillna(1)
@@ -69,34 +75,51 @@ def consolidar_blocado(caminhos, label_resultado, label_stats):
             df = df_produto.set_index("posição no depósito").copy()
             df["Capacidade_restante"] = df["Capacidade_total_pallets"] - df["Pallets_ocupados"]
 
+            saldo_origem = df["Pallets_ocupados"].to_dict()
+            saldo_destino = df["Pallets_ocupados"].to_dict()
             movimentacoes = []
             liberadas = []
             ja_movimentados = set()
+            posicoes_ja_foram_destino = set()
 
             while True:
-                origem = df[df["Pallets_ocupados"] > 0].sort_values("Pallets_ocupados").head(1)
-                destino = df[df["Capacidade_restante"] > 0].sort_values("Pallets_ocupados", ascending=False).head(1)
+                origem_candidates = df[
+                    df.index.isin(saldo_origem.keys()) &
+                    (pd.Series(saldo_origem) > 0) &
+                    (~df.index.isin(posicoes_ja_foram_destino))
+                    ]
+                destino_candidates = df[
+                    df.index.isin(saldo_destino.keys()) &
+                    ((df["Capacidade_total_pallets"] - pd.Series(saldo_destino)) > 0)
+                    ]
 
-                if origem.empty or destino.empty:
+                if origem_candidates.empty or destino_candidates.empty:
                     break
 
-                origem_idx = origem.index[0]
-                destino_idx = destino.index[0]
+                origem_idx = origem_candidates.sort_values("Pallets_ocupados").index[0]
+                destino_idx = destino_candidates.sort_values("Pallets_ocupados", ascending=False).index[0]
 
                 if origem_idx == destino_idx or (origem_idx, destino_idx) in ja_movimentados:
                     break
                 if df.at[origem_idx, "Lote"] != df.at[destino_idx, "Lote"]:
                     break
 
-                mover = min(origem["Pallets_ocupados"].values[0], destino["Capacidade_restante"].values[0])
+                disponivel_origem = saldo_origem.get(origem_idx, 0)
+                capacidade_destino = df.at[destino_idx, "Capacidade_total_pallets"]
+                ocupado_destino = saldo_destino.get(destino_idx, 0)
+                restante_destino = capacidade_destino - ocupado_destino
+
+                mover = min(disponivel_origem, restante_destino)
                 if mover <= 0:
                     break
 
-                df.at[origem_idx, "Pallets_ocupados"] -= mover
-                df.at[destino_idx, "Pallets_ocupados"] += mover
+                saldo_origem[origem_idx] -= mover
+                saldo_destino[destino_idx] += mover
+                df.at[origem_idx, "Pallets_ocupados"] = saldo_origem[origem_idx]
+                df.at[destino_idx, "Pallets_ocupados"] = saldo_destino[destino_idx]
                 df["Capacidade_restante"] = df["Capacidade_total_pallets"] - df["Pallets_ocupados"]
 
-                ocupacao_percentual = df.at[destino_idx, "Pallets_ocupados"] / df.at[destino_idx, "Capacidade_total_pallets"]
+                ocupacao_percentual = saldo_destino[destino_idx] / capacidade_destino
 
                 movimentacoes.append({
                     "Produto": df.at[origem_idx, "Produto"],
@@ -107,14 +130,16 @@ def consolidar_blocado(caminhos, label_resultado, label_stats):
                     "Posição Destino": destino_idx,
                     "Tipologia Destino": df.at[destino_idx, "TP"],
                     "Pallets Movidos": mover,
-                    "Capacidade Total Destino": df.at[destino_idx, "Capacidade_total_pallets"],
-                    "Ocupação Posição Destino": f"{ocupacao_percentual:.0%}"
+                    "Capacidade Total Destino": capacidade_destino,
+                    "Ocupação Posição Destino": f"{ocupacao_percentual:.0%}",
+                    "Pallets pós movimentação": saldo_origem[origem_idx]
                 })
 
                 ja_movimentados.add((origem_idx, destino_idx))
+                posicoes_ja_foram_destino.add(destino_idx)
 
-            for pos, row in df.iterrows():
-                if row["Pallets_ocupados"] == 0:
+            for pos, saldo in saldo_origem.items():
+                if saldo == 0:
                     liberadas.append(pos)
 
             return movimentacoes, liberadas
@@ -130,12 +155,18 @@ def consolidar_blocado(caminhos, label_resultado, label_stats):
         df_sugestoes = pd.DataFrame(sugestoes)
         df_liberadas = pd.DataFrame({"Posições_liberadas": posicoes_liberadas})
 
+        df_sugestoes.sort_values(
+            by=["Posição Origem", "Pallets pós movimentação"],
+            ascending=[True, False],  # Ordem alfabética crescente + Pallets decrescente
+            inplace=True
+        )
+
         if df_sugestoes.empty:
             messagebox.showinfo("Resultado", "Nenhuma sugestão de consolidação foi gerada.")
             return
 
         pasta_destino = caminhos[3] if caminhos[3] else str(Path.home() / "Desktop")
-        datahora = datetime.now().strftime("%Y-%m-%d_%Hh%Mm")
+        datahora = datetime.now().strftime("%d-%m-%Y_%Hh%Mm")
         nome_arquivo = os.path.join(pasta_destino, f"consolidacao_{datahora}.xlsx")
 
         with pd.ExcelWriter(nome_arquivo, engine="xlsxwriter") as writer:
@@ -151,7 +182,8 @@ def consolidar_blocado(caminhos, label_resultado, label_stats):
 
             # Adiciona tabela de posições liberadas por tipologia
             if not df_liberadas.empty:
-                df_liberadas = df_liberadas.merge(tipologia[["Pos.depós.", "TP"]], left_on="Posições_liberadas", right_on="Pos.depós.", how="left")
+                df_liberadas = df_liberadas.merge(tipologia[["Pos.depós.", "TP"]], left_on="Posições_liberadas",
+                                                  right_on="Pos.depós.", how="left")
                 resumo_tipologia = df_liberadas["TP"].value_counts().reset_index()
                 resumo_tipologia.columns = ["TIPOLOGIA", "Total Posições Liberadas"]
                 resumo_tipologia = resumo_tipologia.sort_values("TIPOLOGIA")
@@ -170,10 +202,12 @@ def consolidar_blocado(caminhos, label_resultado, label_stats):
         posicoes_env = df_sugestoes[["Posição Origem", "Posição Destino"]].nunique().sum()
         total_liberadas = len(df_liberadas)
 
-        label_stats.config(fg="black", text=f"Pallets movimentados: {total_movimentacoes} | Posições envolvidas: {posicoes_env} | Posições liberadas: {total_liberadas}")
+        label_stats.config(fg="black",
+                           text=f"Pallets movimentados: {total_movimentacoes} | Posições envolvidas: {posicoes_env} | Posições liberadas: {total_liberadas}")
 
     except Exception as e:
         label_resultado.config(fg="red", text=f"Erro: {str(e)}")
+
 
 # === CRIAR INTERFACE TKINTER ===
 root = tk.Tk()
@@ -190,7 +224,13 @@ altura_tela = root.winfo_screenheight()
 x = (largura_tela - largura) // 2
 y = (altura_tela - altura) // 2
 root.geometry(f"{largura}x{altura}+{x}+{y}")
-#====================================
+# ====================================
+bg_image = Image.open("fundo.jpeg")
+bg_image = bg_image.resize((largura, altura))  # redimensiona para o tamanho da janela
+bg_photo = ImageTk.PhotoImage(bg_image)
+bg_label = tk.Label(root, image=bg_photo)
+bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+
 root.configure(bg="#e3e3e3")
 
 try:
@@ -203,11 +243,12 @@ labels = ["Base Blocado", "Base Tipologia", "Base Empilhamento", "Salvar em"]
 entradas = []
 
 for i, label in enumerate(labels):
-    tk.Label(root, text=label, bg="#e3e3e3", font=("Arial", 10, "bold")).place(x=50, y=30 + i*50)
+    tk.Label(root, text=label, bg="#f9d409", font=("Arial", 10, "bold")).place(x=50, y=30 + i * 50)
     entrada = tk.Entry(root, width=60)
-    entrada.place(x=200, y=30 + i*50)
+    entrada.place(x=200, y=30 + i * 50)
     entrada.insert(0, caminhos[i])
     entradas.append(entrada)
+
 
     def selecionar_arquivo(e=i):
         if e < 3:
@@ -218,28 +259,34 @@ for i, label in enumerate(labels):
             entradas[e].delete(0, tk.END)
             entradas[e].insert(0, caminho)
 
-    tk.Button(root, text="Selecionar", command=selecionar_arquivo).place(x=560, y=30 + i*50)
 
-label_resultado = tk.Label(root, text="", bg="#e3e3e3", font=("Arial", 10, "bold"))
+    tk.Button(root, text="Selecionar", command=selecionar_arquivo).place(x=570, y=27 + i * 50)
+
+label_resultado = tk.Label(root, text="", bg="#f9d409", font=("Arial", 10, "bold"))
 label_resultado.place(x=50, y=260)
 
-label_stats = tk.Label(root, text="", bg="#e3e3e3", font=("Arial", 10))
+label_stats = tk.Label(root, text="", bg="#f9d409", font=("Arial", 10))
 label_stats.place(x=50, y=290)
+
 
 def ao_clicar_gerar():
     novos_caminhos = [entrada.get() for entrada in entradas]
     salvar_caminhos(novos_caminhos)
     consolidar_blocado(novos_caminhos, label_resultado, label_stats)
 
-tk.Button(root, text="Gerar Arquivo", command=ao_clicar_gerar, bg="#002a5e", fg="white", font=("Arial", 10, "bold"), width=20).place(x=270, y=220)
+
+tk.Button(root, text="Gerar Arquivo", command=ao_clicar_gerar, bg="#002a5e", fg="white", font=("Arial", 10, "bold"),
+          width=20).place(x=270, y=220)
+
 
 # Botão de Ajuda
 def mostrar_ajuda():
     messagebox.showinfo("Ajuda", "Selecione as três bases conforme o formato padrão:\n"
-                         "- Base Blocado: colunas Produto, Lote, posição no depósito\n"
-                         "- Tipologia: colunas Pos.depós., TP\n"
-                         "- Empilhamento: colunas UMA, MATERIAL, PALLET - EMPILHAMENTO MÁXIMO\n"
-                         "\nClique em 'Gerar Arquivo' para consolidar posições com o mesmo produto e lote.")
+                                 "- Base Blocado: colunas Produto, Lote, posição no depósito\n"
+                                 "- Tipologia: colunas Pos.depós., TP\n"
+                                 "- Empilhamento: colunas UMA, MATERIAL, PALLET - EMPILHAMENTO MÁXIMO\n"
+                                 "\nClique em 'Gerar Arquivo' para consolidar posições com o mesmo produto e lote.")
+
 
 tk.Button(root, text="Ajuda", command=mostrar_ajuda).place(x=650, y=10)
 
